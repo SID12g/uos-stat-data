@@ -1,0 +1,5 @@
+# 원본을 코드로 다시 내려받는 대용량 경계 파일
+assets/HangJeongDong_*.geojson
+
+# 코드가 다시 만드는 거리행렬 캐시
+outputs/거리행렬_동x시설.npz
