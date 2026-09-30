@@ -1,0 +1,5 @@
+numpy>=1.26
+pandas>=2.2
+scipy>=1.11
+pyproj>=3.6
+openpyxl>=3.1

@@ -77,7 +77,11 @@ def check_conservation(result, demand, supply, rtol=1e-9):
 
 
 def shortage(accessibility, demand, a_star):
-    """부족 석수_i = max(0, A* − A_i) × D_i (공급 단위)."""
+    """고정 목표의 모형상 격차 = max(0, A* − A_i) × D_i (유효 공급 단위).
+
+    관측된 미충족 입소 수요나 대기자 수가 아니다. 수요·목표·기존 공급을
+    고정한 가산적 모형에서 합계는 목표 달성에 필요한 추가 공급의 하한이다.
+    """
     return np.maximum(0.0, a_star - np.asarray(accessibility)) * np.asarray(demand, dtype=float)
 
 
@@ -139,3 +143,56 @@ def greedy_sites(accessibility, demand, dist_candidates_km, supply_new, d0_km, a
         used[k] += 1
         available = used < max_per_site
     return chosen, acc
+
+
+@dataclass
+class MinimumSitesResult:
+    counts: np.ndarray  # 후보별 정수 시설 수
+    accessibility: np.ndarray
+    objective: int
+    lower_bound: float
+    certified: bool
+
+
+def minimum_sites(accessibility, demand, dist_candidates_km, supply_new, d0_km,
+                  a_star, target, max_per_site=1, decay="gaussian", time_limit=60):
+    """고정 후보·동일 시설 규모에서 목표를 달성하는 최소 시설 수(MILP).
+
+    후보지는 실제 부지가 아닌 좌표이며, 비용·연면적·인력 제약은 포함하지
+    않는다. greedy_sites의 순차 배치와 구별한다. 최적성이 증명되지 않은
+    실행 가능 해는 certified=False로 돌려주며 최소라고 부르면 안 된다.
+    """
+    from scipy.optimize import Bounds, LinearConstraint, milp
+
+    acc = np.asarray(accessibility, dtype=float)
+    demand = np.asarray(demand, dtype=float)
+    target = np.asarray(target, dtype=bool)
+    dist = np.asarray(dist_candidates_km, dtype=float)
+    if (dist.shape[0] != len(acc) or demand.shape != acc.shape or target.shape != acc.shape
+            or max_per_site < 1 or int(max_per_site) != max_per_site or supply_new <= 0):
+        raise ValueError("수요·접근성·대상·후보의 크기와 시설 제약을 확인한다")
+    decay_fn = DECAY_FUNCTIONS[decay] if isinstance(decay, str) else decay
+    w = decay_fn(dist, d0_km)
+    weighted = demand @ w
+    delta = np.divide(supply_new * w, weighted[None, :],
+                      out=np.zeros_like(w), where=weighted[None, :] > 0)
+    need = np.maximum(0, a_star - acc[target])
+    counts = np.zeros(dist.shape[1], dtype=int)
+    if not np.any(need > 1e-9):
+        return MinimumSitesResult(counts, acc.copy(), 0, 0.0, True)
+    active = np.any(delta[target] > 0, axis=0)
+    if not active.any():
+        raise RuntimeError("주어진 후보로 목표를 충족할 수 없다")
+    b = delta[target][:, active]
+    result = milp(c=np.ones(b.shape[1]), integrality=np.ones(b.shape[1]),
+                  bounds=Bounds(0, max_per_site),
+                  constraints=LinearConstraint(b, need, np.inf),
+                  options={"time_limit": time_limit, "mip_rel_gap": 0})
+    if result.x is None:
+        raise RuntimeError(f"배치 해를 얻지 못했다: {result.message}")
+    counts[active] = np.rint(result.x).astype(int)
+    new_acc = acc + delta @ counts
+    if np.any(new_acc[target] < a_star - 1e-8):
+        raise RuntimeError("정수화한 배치가 목표를 충족하지 않는다")
+    return MinimumSitesResult(counts, new_acc, int(counts.sum()),
+                              float(result.mip_dual_bound), result.status == 0)
