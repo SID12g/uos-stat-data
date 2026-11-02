@@ -14,16 +14,48 @@ import numpy as np
 _EXP_HALF = np.exp(-0.5)
 
 
+def _nonnegative(values, name, ndim):
+    values = np.asarray(values, dtype=float)
+    if values.ndim != ndim or not np.isfinite(values).all() or (values < 0).any():
+        raise ValueError(f"{name}: {ndim}차원 유한한 비음수 값이어야 한다")
+    return values
+
+
+def _radius(d0_km):
+    radius = np.asarray(d0_km, dtype=float)
+    if radius.ndim != 0 or not np.isfinite(radius) or radius <= 0:
+        raise ValueError("d0_km: 유한한 양수 반경이어야 한다")
+    return float(radius)
+
+
+def _distances(dist_km):
+    dist = np.asarray(dist_km, dtype=float)
+    if not np.isfinite(dist).all() or (dist < 0).any():
+        raise ValueError("dist_km: 유한한 비음수 거리이어야 한다")
+    return dist
+
+
+def _weights(dist_km, d0_km, decay):
+    dist = _distances(dist_km)
+    radius = _radius(d0_km)
+    fn = DECAY_FUNCTIONS[decay] if isinstance(decay, str) else decay
+    w = np.asarray(fn(dist, radius), dtype=float)
+    if w.shape != dist.shape or not np.isfinite(w).all() or (w < 0).any():
+        raise ValueError("거리 가중치는 거리와 같은 크기의 유한한 비음수 값이어야 한다")
+    return w
+
+
 def gaussian_decay(dist_km, d0_km):
     """W(d) = [exp(-½(d/d0)²) - exp(-½)] / [1 - exp(-½)] (d ≤ d0), 그 밖에는 0. W(0) = 1, W(d0) = 0."""
-    d = np.asarray(dist_km, dtype=float)
+    d = _distances(dist_km)
+    d0_km = _radius(d0_km)
     w = (np.exp(-0.5 * (d / d0_km) ** 2) - _EXP_HALF) / (1 - _EXP_HALF)
     return np.where(d <= d0_km, w, 0.0)
 
 
 def uniform_decay(dist_km, d0_km):
     """거리감쇠 없는 원래 2SFCA: 반경 안이면 1."""
-    return (np.asarray(dist_km, dtype=float) <= d0_km).astype(float)
+    return (_distances(dist_km) <= _radius(d0_km)).astype(float)
 
 
 DECAY_FUNCTIONS = {"gaussian": gaussian_decay, "uniform": uniform_decay}
@@ -33,6 +65,9 @@ def distance_matrix_km(demand_xy, supply_xy):
     """평면 좌표(미터, 예: EPSG:5179) 사이의 직선거리 행렬(km). 행: 수요 지점, 열: 공급 지점."""
     a = np.asarray(demand_xy, dtype=float)
     b = np.asarray(supply_xy, dtype=float)
+    if (a.ndim != 2 or b.ndim != 2 or a.shape[1] != 2 or b.shape[1] != 2
+            or not np.isfinite(a).all() or not np.isfinite(b).all()):
+        raise ValueError("좌표는 유한한 (n, 2), (m, 2) 배열이어야 한다")
     diff = a[:, None, :] - b[None, :, :]
     return np.sqrt((diff ** 2).sum(axis=2)) / 1_000
 
@@ -51,13 +86,12 @@ def e2sfca(demand, supply, dist_km, d0_km, decay="gaussian"):
     demand: (n,) 수요 D_i, supply: (m,) 공급 S_j, dist_km: (n, m) 거리 행렬(km),
     d0_km: 반경, decay: "gaussian" | "uniform" 또는 (dist, d0) → 가중치 함수.
     """
-    demand = np.asarray(demand, dtype=float)
-    supply = np.asarray(supply, dtype=float)
-    assert dist_km.shape == (len(demand), len(supply))
-    assert (demand >= 0).all() and (supply >= 0).all()
-
-    decay_fn = DECAY_FUNCTIONS[decay] if isinstance(decay, str) else decay
-    w = decay_fn(dist_km, d0_km)
+    demand = _nonnegative(demand, "demand", 1)
+    supply = _nonnegative(supply, "supply", 1)
+    dist_km = _distances(dist_km)
+    if dist_km.shape != (len(demand), len(supply)):
+        raise ValueError("거리 행렬의 크기는 (수요 수, 공급 수)이어야 한다")
+    w = _weights(dist_km, d0_km, decay)
 
     weighted_demand = demand @ w  # (m,)
     no_demand = weighted_demand <= 0
@@ -91,8 +125,12 @@ def add_facility(accessibility, demand, dist_new_km, supply_new, d0_km, decay="g
     기존 시설의 R_j는 자기 공급과 반경 안 수요로만 정해지므로 새 시설이 생겨도 변하지 않는다.
     따라서 A_i' = A_i + R_new · W(d_i,new) 로 전체를 다시 계산한 것과 정확히 같다.
     """
-    decay_fn = DECAY_FUNCTIONS[decay] if isinstance(decay, str) else decay
-    w = decay_fn(np.asarray(dist_new_km, dtype=float), d0_km)
+    accessibility = _nonnegative(accessibility, "accessibility", 1)
+    demand = _nonnegative(demand, "demand", 1)
+    supply_new = float(_nonnegative(supply_new, "supply_new", 0))
+    w = _weights(dist_new_km, d0_km, decay)
+    if w.shape != demand.shape or accessibility.shape != demand.shape:
+        raise ValueError("접근성·수요·신규 시설 거리의 크기가 같아야 한다")
     weighted = float(np.dot(demand, w))
     if weighted <= 0:
         return np.asarray(accessibility, dtype=float).copy()
@@ -164,15 +202,16 @@ def minimum_sites(accessibility, demand, dist_candidates_km, supply_new, d0_km,
     """
     from scipy.optimize import Bounds, LinearConstraint, milp
 
-    acc = np.asarray(accessibility, dtype=float)
-    demand = np.asarray(demand, dtype=float)
+    acc = _nonnegative(accessibility, "accessibility", 1)
+    demand = _nonnegative(demand, "demand", 1)
+    supply_new = float(_nonnegative(supply_new, "supply_new", 0))
+    a_star = float(_nonnegative(a_star, "a_star", 0))
     target = np.asarray(target, dtype=bool)
     dist = np.asarray(dist_candidates_km, dtype=float)
-    if (dist.shape[0] != len(acc) or demand.shape != acc.shape or target.shape != acc.shape
+    if (dist.ndim != 2 or dist.shape[0] != len(acc) or demand.shape != acc.shape or target.shape != acc.shape
             or max_per_site < 1 or int(max_per_site) != max_per_site or supply_new <= 0):
         raise ValueError("수요·접근성·대상·후보의 크기와 시설 제약을 확인한다")
-    decay_fn = DECAY_FUNCTIONS[decay] if isinstance(decay, str) else decay
-    w = decay_fn(dist, d0_km)
+    w = _weights(dist, d0_km, decay)
     weighted = demand @ w
     delta = np.divide(supply_new * w, weighted[None, :],
                       out=np.zeros_like(w), where=weighted[None, :] > 0)
