@@ -14,6 +14,7 @@ import pandas as pd
 from pyproj import Transformer
 
 import e2sfca as E
+from review_settings import require_baseline
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "outputs"
@@ -24,7 +25,7 @@ GRADE = GU / "국민건강보험공단_노인장기요양보험 등급판정 현
 INPUT_NAMES = ["동별_수요.csv", "시설_공급.csv", "동별_접근성.csv", "견고한_우선동.csv",
                "시뮬레이션_greedy_우선동한정.csv", "q_표.csv", "압력효과_지역통제.csv",
                "시점외_검증.csv", "동별_미래부족석수.csv", "하락속도_상위10%_동.csv",
-               "입소시설_분석범위.csv", "우선동_유지_규모.csv"]
+               "입소시설_분석범위.csv", "우선동_유지_규모.csv", "서울_등급압력_검정.csv", "서울_등급_회귀.csv"]
 
 
 def vacancy_table():
@@ -57,6 +58,7 @@ def vacancy_table():
 
 
 def main():
+    require_baseline()  # 다른 시나리오의 산출물에 기본 설정 보고서를 덮어쓰지 않는다.
     d = pd.read_csv(OUT / "동별_수요.csv", dtype={"행정동코드": str})
     f = pd.read_csv(OUT / "시설_공급.csv", dtype={"장기요양기관코드": str})
     rob = pd.read_csv(OUT / "견고한_우선동.csv", dtype={"행정동코드": str})
@@ -131,6 +133,7 @@ def main():
     vacancy, all_age_g12 = vacancy_table()
     validation = pd.read_csv(OUT / "압력효과_지역통제.csv").set_index("반경(km)").loc[5]
     oot = pd.read_csv(OUT / "시점외_검증.csv").set_index("반경(km)").loc[5]
+    grade_test = pd.read_csv(OUT / "서울_등급압력_검정.csv").set_index("제거 변수").loc["등급"]
     future = pd.read_csv(OUT / "동별_미래부족석수.csv")
     q_b = pd.read_csv(OUT / "q_표.csv", index_col=0).loc["B", "occupancy"]
     improve = sf & f["등급"].isin(["C", "D", "E"])
@@ -161,14 +164,17 @@ def main():
         "04": [f"주 설정(A·가동률 비·가우스 감쇠·5km)의 비교 대상은 {eligible.sum()}개 동이다. 잠재 인정자 100명당 유효 정원은 중앙값 {a_star*100:.1f}석, 10% 경계 {np.quantile(acc[eligible],.1)*100:.1f}석, 90% 경계 {np.quantile(acc[eligible],.9)*100:.1f}석이다.",
                f"네 반경 모두 하위 10%인 동은 주 설정 {len(base)}곳이다. 원래 {len(base)}곳 중 유지: {retained}. 미평가 q는 각 설정의 서울 평가시설 정원가중 평균(이진 가중 약 0.791)이다. 반경에 대한 견고성과 모든 가정에 대한 강건성을 구별한다. 전체 교집합 크기와 동 명단은 우선동_가정민감도 CSV를 참고한다."],
         "05": [f"5km 수요 압력의 만실 오즈비는 전체 {validation['OR(전체)']:.2f}, 시도 통제 {validation['OR(시도 통제)']:.2f}(p={validation['p(시도 통제)']:.2f}), 서울만 {validation['OR(서울만)']:.2f}(p={validation['p(서울만)']:.2f})다. 서울 동 순위는 이 자료로 뚜렷하게 검증하지 못했다. 만실 비율 68%는 검정력을 제한할 수 있으나 원인으로 확인되지 않았다.",
-               f"기존 2025년 시점 외 예측에서 5km AUC는 {oot['AUC(2025)']:.3f}, 압력 추가에 따른 증가는 {oot['ΔAUC(압력 추가)']:.3f}으로 작다. 실제 입소 출발지·대기자 자료를 이용한 검증이 필요하다. 여기서는 기존 회귀 CSV를 읽었으며 회귀를 다시 적합하지 않았다."],
+               f"2025년 시점 외 예측에서 5km AUC는 {oot['AUC(2025)']:.3f}, 압력 추가에 따른 증가는 {oot['ΔAUC(압력 추가)']:.3f}으로 작다. 실제 입소 출발지·대기자 자료를 이용한 검증이 필요하다. 이 보고서 생성 단계는 05 노트북이 저장한 회귀 CSV를 읽는다.",
+               f"만실 검증은 일반 정원 기준 압력을 사용한다. 서울 시설의 등급 추가 설명력은 LR={grade_test['LR']:.2f}(df={int(grade_test['자유도'])}, p={grade_test['p']:.4f})다. 등급별 q를 압력에 넣고 등급을 통제하면 q 유무의 차이가 등급 계수에 흡수되므로 두 압력 버전의 일치는 독립적 강건성 근거가 아니다."],
         "06": [f"수요와 2024년 서울 중앙값 목표를 고정한 모형상 격차 합계는 유효 정원 {gap:,.0f}석이다. 서울 평균 q={q:.6f}의 신규 시설을 가정한 물리적 정원 환산 하한은 {gap/q:,.0f}석이다. 관측된 미충족 입소 수요가 아니다.",
                f"서울 {eligible.sum()}개 동 중심점·5km·50석·동일 q·우선 {len(base)}동 목표의 정수 최적화: 후보당 1곳이면 최소 {opt_rows[0]['최소시설수']}곳({opt_rows[0]['정원']:,}석), 2곳이면 최소 {opt_rows[1]['최소시설수']}곳({opt_rows[1]['정원']:,}석)이다. 기존 greedy는 후보당 1곳 {scale.loc[2024,'한 동에 1곳']}, 2곳 {scale.loc[2024,'한 동에 2곳까지']}의 순차 배치 해이며 최소로 부르지 않는다. 기존 {len(sites)}곳 지도는 수요가중 제곱 격차를 가장 줄이는 후보 순서로 고른 배치다.",
                f"기존 26곳 배치에서 서울 전체 격차는 {stats['배치26_전체격차']:,.0f}석, 품질 가중치 개선을 더하면 {stats['신규와품질가중_격차']:,.0f}석이다. 전국 100명당 159.8석은 총유효정원÷전국 65세 이상 인정자라는 총량 비율로, 전국 동 접근성 중앙값과 비교한 것이 아니다."],
         "07": [f"인정률·공급을 2024년 수준으로 고정한 시나리오의 서울 잠재 수요는 2029년 {stats['미래']['2029']['잠재수요']:,.0f}명, 2034년 {stats['미래']['2034']['잠재수요']:,.0f}명이다. 목표와 q를 고정한 정원 환산 하한은 각각 {stats['미래']['2029']['정원환산하한']:,.0f}석, {stats['미래']['2034']['정원환산하한']:,.0f}석이다.",
                f"기존 2034년 순차 배치는 후보당 2곳에서 {scale.loc[2034,'한 동에 2곳까지']}으로 목표에 도달한 실행 가능 해이며 최소를 증명한 값이 아니다. 서울 총량 보정은 동별 순이동을 검증하지 않는다. 2019→2024 인구 역검증·동별 이동·정비사업 시나리오는 후속 과제다."],
     }
-    inputs = [OUT / name for name in INPUT_NAMES] + [FACILITY, EVALUATION, GRADE, ROOT / "e2sfca.py", Path(__file__)]
+    inputs = [OUT / name for name in INPUT_NAMES] + [FACILITY, EVALUATION, GRADE,
+              ROOT / "e2sfca.py", ROOT / "config.py", ROOT / "review_settings.py",
+              ROOT / "validation.py", Path(__file__)]
     provenance = {str(p.relative_to(ROOT.parent)): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
     payload = {"조건": {"주반경km": 5, "민감도반경km": [3, 5, 10, 15], "소수요제외65세인구": 100,
                         "하위동수": n_bottom, "미평가q": "각 설정의 서울 평가시설 정원가중 평균",
@@ -183,10 +189,15 @@ def main():
 
 def reviewed_sentences(stage):
     """입력의 해시가 일치할 때만 검토 문장을 반환한다. 오래된 출력은 거부한다."""
+    require_baseline()
     path = OUT / "검토_재계산.json"
     if not path.exists():
         raise RuntimeError("01~07 산출물 준비 후 python 검토_재계산.py를 실행한다")
     payload = json.loads(path.read_text())
+    required = {str((ROOT / name).relative_to(ROOT.parent))
+                for name in ("config.py", "review_settings.py", "validation.py")}
+    if not required.issubset(payload["입력sha256"]):
+        raise RuntimeError("설정·검증 코드 해시가 없는 이전 검토 산출물이다. python 검토_재계산.py를 다시 실행한다")
     for relative, digest in payload["입력sha256"].items():
         p = ROOT.parent / relative
         if hashlib.sha256(p.read_bytes()).hexdigest() != digest:
